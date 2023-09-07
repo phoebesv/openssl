@@ -33,7 +33,7 @@ void sha512_block_data_order(SHA512_CTX *ctx, const void *in, size_t num);
 
 void sha512_block_data_order(SHA512_CTX *ctx, const void *in, size_t num)
 {
-    if (RISCV_HAS_ZVBB_AND_ZVKNHB() && riscv_vlen() >= 256) {
+    if (RISCV_HAS_ZVBB_AND_ZVKNHB() && riscv_vlen() >= 128) {
         sha512_block_data_order_zvbb_zvknhb(ctx, in, num);
     } else {
         sha512_block_data_order_c(ctx, in, num);

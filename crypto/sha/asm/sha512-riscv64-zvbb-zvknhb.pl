@@ -11,6 +11,7 @@
 # or
 #
 # Copyright (c) 2023, Christoph Müllner <christoph.muellner@vrull.eu>
+# Copyright (c) 2023, Phoebe Chen <phoebe.chen@sifive.com>
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -36,7 +37,7 @@
 
 # The generated code of this file depends on the following RISC-V extensions:
 # - RV64I
-# - RISC-V vector ('V') with VLEN >= 256
+# - RISC-V vector ('V') with VLEN >= 128
 # - Vector Bit-manipulation used in Cryptography ('Zvbb')
 # - Vector SHA-2 Secure Hash ('Zvknhb')
 
@@ -59,13 +60,16 @@ my $code=<<___;
 .text
 ___
 
-my ($V0, $V10, $V11, $V12, $V13, $V14, $V15, $V16, $V17) = ("v0", "v10", "v11", "v12", "v13", "v14","v15", "v16", "v17");
-my ($V26, $V27) = ("v26", "v27");
+my ($V0, $V1, $V2, $V3, $V4, $V5, $V6, $V7,
+    $V8, $V9, $V10, $V11, $V12, $V13, $V14, $V15,
+    $V16, $V17, $V18, $V19, $V20, $V21, $V22, $V23,
+    $V24, $V25, $V26, $V27, $V28, $V29, $V30, $V31,
+) = map("v$_",(0..31));
 
 my $K512 = "K512";
 
 # Function arguments
-my ($H, $INP, $LEN, $KT, $STRIDE) = ("a0", "a1", "a2", "a3", "t3");
+my ($H, $INP, $LEN, $KT, $H2, $INDEX_PATTERN) = ("a0", "a1", "a2", "a3", "t3", "t4");
 
 ################################################################################
 # void sha512_block_data_order_zvbb_zvknhb(void *c, const void *p, size_t len)
@@ -74,252 +78,137 @@ $code .= <<___;
 .globl sha512_block_data_order_zvbb_zvknhb
 .type sha512_block_data_order_zvbb_zvknhb,\@function
 sha512_block_data_order_zvbb_zvknhb:
-    @{[vsetivli__x0_4_e64_m1_tu_mu]}
+    @{[vsetivli "zero", 4, "e64", "m2", "ta", "ma"]}
 
     # H is stored as {a,b,c,d},{e,f,g,h}, but we need {f,e,b,a},{h,g,d,c}
-    # We achieve this by reading with a negative stride followed by
-    # element sliding.
-    li $STRIDE, -8
-    addi $H, $H, 24
-    @{[vlse64_v $V16, $H, $STRIDE]} # {d,c,b,a}
-    addi $H, $H, 32
-    @{[vlse64_v $V17, $H, $STRIDE]} # {h,g,f,e}
-    # Keep H advanced by 24
-    addi $H, $H, -32
+    # The dst vtype is e64m2 and the index vtype is e8mf4.
+    # We use index-load with the following index pattern at v1.
+    #   i8 index:
+    #     40, 32, 8, 0
+    # Instead of setting the i8 index, we could use a single 32bit
+    # little-endian value to cover the 4xi8 index.
+    #   i32 value:
+    #     0x 00 08 20 28
+    li $INDEX_PATTERN, 0x00082028
+    @{[vsetivli "zero", 1, "e32", "m1", "ta", "ma"]}
+    @{[vmv_v_x $V1, $INDEX_PATTERN]}
 
-    @{[vmv_v_v $V27, $V16]} # {d,c,b,a}
-    @{[vslidedown_vi $V26, $V16, 2]} # {b,a,X,X}
-    @{[vslidedown_vi $V16, $V17, 2]} # {f,e,X,X}
-    @{[vslideup_vi $V16, $V26, 2]} # {f,e,b,a}
-    @{[vslideup_vi $V17, $V27, 2]} # {h,g,d,c}
+    addi $H2, $H, 16
 
-    # Keep the old state as we need it later: H' = H+{a',b',c',...,h'}.
-    @{[vmv_v_v $V26, $V16]}
-    @{[vmv_v_v $V27, $V17]}
+    # Use index-load to get {f,e,b,a},{h,g,d,c}
+    @{[vsetivli "zero", 4, "e64", "m2", "ta", "ma"]}
+    @{[vluxei8_v $V22, $H, $V1]}
+    @{[vluxei8_v $V24, $H2, $V1]}
+
+    # Setup v0 mask for the vmerge to replace the first word (idx==0) in key-scheduling.
+    # The AVL is 4 in SHA, so we could use a single e8(8 element masking) for masking.
+    @{[vsetivli "zero", 1, "e8", "m1", "ta", "ma"]}
+    @{[vmv_v_i $V0, 0x01]}
+
+    @{[vsetivli "zero", 4, "e64", "m2", "ta", "ma"]}
 
 L_round_loop:
-    la $KT, $K512 # Load round constants K512
-
-    # Load the 1024-bits of the message block in v10-v13 and perform
-    # an endian swap on each 4 bytes element.
-    @{[vle64_v $V10, $INP]}
-    @{[vrev8_v $V10, $V10]}
-    add $INP, $INP, 32
-    @{[vle64_v $V11, $INP]}
-    @{[vrev8_v $V11, $V11]}
-    add $INP, $INP, 32
-    @{[vle64_v $V12, $INP]}
-    @{[vrev8_v $V12, $V12]}
-    add $INP, $INP, 32
-    @{[vle64_v $V13, $INP]}
-    @{[vrev8_v $V13, $V13]}
-    add $INP, $INP, 32
+    # Load round constants K512
+    la $KT, $K512
 
     # Decrement length by 1
-    add $LEN, $LEN, -1
+    addi $LEN, $LEN, -1
 
-    # Set v0 up for the vmerge that replaces the first word (idx==0)
-    @{[vid_v $V0]}
-    @{[vmseq_vi $V0, $V0, 0x0]} # v0.mask[i] = (i == 0 ? 1 : 0)
+    # Keep the current state as we need it later: H' = H+{a',b',c',...,h'}.
+    @{[vmv_v_v $V26, $V22]}
+    @{[vmv_v_v $V28, $V24]}
 
-    # Quad-round 0 (+0, v10->v11->v12->v13)
-    @{[vle64_v $V15, ($KT)]}
+    # Load the 1024-bits of the message block in v10-v16 and perform the endian
+    # swap.
+    @{[vle64_v $V10, $INP]}
+    @{[vrev8_v $V10, $V10]}
+    addi $INP, $INP, 32
+    @{[vle64_v $V12, $INP]}
+    @{[vrev8_v $V12, $V12]}
+    addi $INP, $INP, 32
+    @{[vle64_v $V14, $INP]}
+    @{[vrev8_v $V14, $V14]}
+    addi $INP, $INP, 32
+    @{[vle64_v $V16, $INP]}
+    @{[vrev8_v $V16, $V16]}
+    addi $INP, $INP, 32
+
+    .rept 4
+    # Quad-round 0 (+0, v10->v12->v14->v16)
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V10]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V12, $V11, $V0]}
-    @{[vsha2ms_vv $V10, $V14, $V13]}
+    @{[vadd_vv $V18, $V20, $V10]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
+    @{[vmerge_vvm $V18, $V14, $V12, $V0]}
+    @{[vsha2ms_vv $V10, $V18, $V16]}
 
-    # Quad-round 1 (+1, v11->v12->v13->v10)
-    @{[vle64_v $V15, ($KT)]}
+    # Quad-round 1 (+1, v12->v14->v16->v10)
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V11]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V13, $V12, $V0]}
-    @{[vsha2ms_vv $V11, $V14, $V10]}
+    @{[vadd_vv $V18, $V20, $V12]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
+    @{[vmerge_vvm $V18, $V16, $V14, $V0]}
+    @{[vsha2ms_vv $V12, $V18, $V10]}
 
-    # Quad-round 2 (+2, v12->v13->v10->v11)
-    @{[vle64_v $V15, ($KT)]}
+    # Quad-round 2 (+2, v14->v16->v10->v12)
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V12]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V10, $V13, $V0]}
-    @{[vsha2ms_vv $V12, $V14, $V11]}
+    @{[vadd_vv $V18, $V20, $V14]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
+    @{[vmerge_vvm $V18, $V10, $V16, $V0]}
+    @{[vsha2ms_vv $V14, $V18, $V12]}
 
-    # Quad-round 3 (+3, v13->v10->v11->v12)
-    @{[vle64_v $V15, ($KT)]}
+    # Quad-round 3 (+3, v16->v10->v12->v14)
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V13]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V11, $V10, $V0]}
-    @{[vsha2ms_vv $V13, $V14, $V12]}
+    @{[vadd_vv $V18, $V20, $V16]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
+    @{[vmerge_vvm $V18, $V12, $V10, $V0]}
+    @{[vsha2ms_vv $V16, $V18, $V14]}
+    .endr
 
-    # Quad-round 4 (+0, v10->v11->v12->v13)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V10]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V12, $V11, $V0]}
-    @{[vsha2ms_vv $V10, $V14, $V13]}
-
-    # Quad-round 5 (+1, v11->v12->v13->v10)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V11]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V13, $V12, $V0]}
-    @{[vsha2ms_vv $V11, $V14, $V10]}
-
-    # Quad-round 6 (+2, v12->v13->v10->v11)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V12]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V10, $V13, $V0]}
-    @{[vsha2ms_vv $V12, $V14, $V11]}
-
-    # Quad-round 7 (+3, v13->v10->v11->v12)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V13]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V11, $V10, $V0]}
-    @{[vsha2ms_vv $V13, $V14, $V12]}
-
-    # Quad-round 8 (+0, v10->v11->v12->v13)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V10]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V12, $V11, $V0]}
-    @{[vsha2ms_vv $V10, $V14, $V13]}
-
-    # Quad-round 9 (+1, v11->v12->v13->v10)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V11]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V13, $V12, $V0]}
-    @{[vsha2ms_vv $V11, $V14, $V10]}
-
-    # Quad-round 10 (+2, v12->v13->v10->v11)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V12]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V10, $V13, $V0]}
-    @{[vsha2ms_vv $V12, $V14, $V11]}
-
-    # Quad-round 11 (+3, v13->v10->v11->v12)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V13]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V11, $V10, $V0]}
-    @{[vsha2ms_vv $V13, $V14, $V12]}
-
-    # Quad-round 12 (+0, v10->v11->v12->v13)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V10]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V12, $V11, $V0]}
-    @{[vsha2ms_vv $V10, $V14, $V13]}
-
-    # Quad-round 13 (+1, v11->v12->v13->v10)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V11]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V13, $V12, $V0]}
-    @{[vsha2ms_vv $V11, $V14, $V10]}
-
-    # Quad-round 14 (+2, v12->v13->v10->v11)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V12]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V10, $V13, $V0]}
-    @{[vsha2ms_vv $V12, $V14, $V11]}
-
-    # Quad-round 15 (+3, v13->v10->v11->v12)
-    @{[vle64_v $V15, ($KT)]}
-    addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V13]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V11, $V10, $V0]}
-    @{[vsha2ms_vv $V13, $V14, $V12]}
-
-    # Quad-round 16 (+0, v10->v11->v12->v13)
-    # Note that we stop generating new message schedule words (Wt, v10-13)
+    # Quad-round 16 (+0, v10->v12->v14->v16)
+    # Note that we stop generating new message schedule words (Wt, v10-16)
     # as we already generated all the words we end up consuming (i.e., W[79:76]).
-    @{[vle64_v $V15, ($KT)]}
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V10]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V12, $V11, $V0]}
+    @{[vadd_vv $V18, $V20, $V10]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
 
-    # Quad-round 17 (+1, v11->v12->v13->v10)
-    @{[vle64_v $V15, ($KT)]}
+    # Quad-round 17 (+1, v12->v14->v16->v10)
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V11]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V13, $V12, $V0]}
+    @{[vadd_vv $V18, $V20, $V12]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
 
-    # Quad-round 18 (+2, v12->v13->v10->v11)
-    @{[vle64_v $V15, ($KT)]}
+    # Quad-round 18 (+2, v14->v16->v10->v12)
+    @{[vle64_v $V20, ($KT)]}
     addi $KT, $KT, 32
-    @{[vadd_vv $V14, $V15, $V12]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
-    @{[vmerge_vvm $V14, $V10, $V13, $V0]}
+    @{[vadd_vv $V18, $V20, $V14]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
 
-    # Quad-round 19 (+3, v13->v10->v11->v12)
-    @{[vle64_v $V15, ($KT)]}
+    # Quad-round 19 (+3, v16->v10->v12->v14)
+    @{[vle64_v $V20, ($KT)]}
     # No t1 increment needed.
-    @{[vadd_vv $V14, $V15, $V13]}
-    @{[vsha2cl_vv $V17, $V16, $V14]}
-    @{[vsha2ch_vv $V16, $V17, $V14]}
+    @{[vadd_vv $V18, $V20, $V16]}
+    @{[vsha2cl_vv $V24, $V22, $V18]}
+    @{[vsha2ch_vv $V22, $V24, $V18]}
 
     # H' = H+{a',b',c',...,h'}
-    @{[vadd_vv $V16, $V26, $V16]}
-    @{[vadd_vv $V17, $V27, $V17]}
-    @{[vmv_v_v $V26, $V16]}
-    @{[vmv_v_v $V27, $V17]}
+    @{[vadd_vv $V22, $V26, $V22]}
+    @{[vadd_vv $V24, $V28, $V24]}
     bnez $LEN, L_round_loop
 
-    # v26 = v16 = {f,e,b,a}
-    # v27 = v17 = {h,g,d,c}
-    # Let's do the opposit transformation like on entry.
-
-    @{[vslideup_vi $V17, $V16, 2]} # {h,g,f,e}
-
-    @{[vslidedown_vi $V16, $V27, 2]} # {d,c,X,X}
-    @{[vslidedown_vi $V26, $V26, 2]} # {b,a,X,X}
-    @{[vslideup_vi $V16, $V26, 2]} # {d,c,b,a}
-
-    # H is already advanced by 24
-    @{[vsse64_v $V16, $H, $STRIDE]} # {a,b,c,d}
-    addi $H, $H, 32
-    @{[vsse64_v $V17, $H, $STRIDE]} # {e,f,g,h}
+    # Store {f,e,b,a},{h,g,d,c} back to {a,b,c,d},{e,f,g,h}.
+    @{[vsuxei8_v $V22, ($H), $V1]}
+    @{[vsuxei8_v $V24, ($H2), $V1]}
 
     ret
 .size sha512_block_data_order_zvbb_zvknhb,.-sha512_block_data_order_zvbb_zvknhb
