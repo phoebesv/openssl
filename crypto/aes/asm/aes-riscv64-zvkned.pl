@@ -583,6 +583,250 @@ L_cbc_dec_256:
 .size L_cbc_dec_256,.-L_cbc_dec_256
 ___
 
+###############################################################################
+# void rv64i_zvkned_ecb_encrypt(const unsigned char *in, unsigned char *out,
+#                               size_t length, const AES_KEY *key,
+#                               const int enc);
+my ($INP, $OUTP, $LEN, $KEYP, $ENC) = ("a0", "a1", "a2", "a3", "a4");
+my ($REMAIN_LEN) = ("a5");
+my ($VL) = ("a6");
+my ($T0, $T1, $rounds) = ("t0", "t1", "t2");
+my ($LEN32) = ("t3");
+my ($v0, $v1, $v2, $v3, $v4, $v5, $v6, $v7,
+    $v8, $v9, $v10, $v11, $v12, $v13, $v14, $v15,
+    $v16, $v17, $v18, $v19, $v20, $v21, $v22, $v23,
+    $v24, $v25, $v26, $v27, $v28, $v29, $v30, $v31,
+) = map("v$_",(0..31));
+
+$code .= <<___;
+.p2align 3
+.globl rv64i_zvkned_ecb_encrypt
+.type rv64i_zvkned_ecb_encrypt,\@function
+rv64i_zvkned_ecb_encrypt:
+    # Make the LEN become e32 length.
+    srli $LEN32, $LEN, 2
+
+    # Load number of rounds
+    lwu $rounds, 240($KEYP)
+
+    # Get proper routine for key size
+    li $T0, 10
+    beq $rounds, $T0, L_ecb_enc_128
+
+    li $T0, 12
+    beq $rounds, $T0, L_ecb_enc_192
+
+    li $T0, 14
+    beq $rounds, $T0, L_ecb_enc_256
+
+    ret
+.size rv64i_zvkned_ecb_encrypt,.-rv64i_zvkned_ecb_encrypt
+___
+
+$code .= <<___;
+.p2align 3
+L_ecb_enc_128:
+    # Load all 11 round keys to v1-v11 registers.
+    @{[aes_128_load_key]}
+
+1:
+    @{[vsetvli $VL, $LEN32, "e32", "m4", "ta", "ma"]}
+    slli $T0, $VL, 2
+    sub $LEN32, $LEN32, $VL
+
+    @{[vle32_v $v24, ($INP)]}
+
+    # AES body
+    @{[aes_128_encrypt]}
+
+    @{[vse32_v $v24, ($OUTP)]}
+
+    add $INP, $INP, $T0
+    add $OUTP, $OUTP, $T0
+
+    bnez $LEN32, 1b
+
+    ret
+.size L_ecb_enc_128,.-L_ecb_enc_128
+___
+
+$code .= <<___;
+.p2align 3
+L_ecb_enc_192:
+    # Load all 13 round keys to v1-v13 registers.
+    @{[aes_192_load_key]}
+
+1:
+    @{[vsetvli $VL, $LEN32, "e32", "m4", "ta", "ma"]}
+    slli $T0, $VL, 2
+    sub $LEN32, $LEN32, $VL
+
+    @{[vle32_v $v24, ($INP)]}
+
+    # AES body
+    @{[aes_192_encrypt]}
+
+    @{[vse32_v $v24, ($OUTP)]}
+
+    add $INP, $INP, $T0
+    add $OUTP, $OUTP, $T0
+
+    bnez $LEN32, 1b
+
+    ret
+.size L_ecb_enc_192,.-L_ecb_enc_192
+___
+
+$code .= <<___;
+.p2align 3
+L_ecb_enc_256:
+    # Load all 15 round keys to v1-v15 registers.
+    @{[aes_256_load_key]}
+
+1:
+    @{[vsetvli $VL, $LEN32, "e32", "m4", "ta", "ma"]}
+    slli $T0, $VL, 2
+    sub $LEN32, $LEN32, $VL
+
+    @{[vle32_v $v24, ($INP)]}
+
+    # AES body
+    @{[aes_256_encrypt]}
+
+    @{[vse32_v $v24, ($OUTP)]}
+
+    add $INP, $INP, $T0
+    add $OUTP, $OUTP, $T0
+
+    bnez $LEN32, 1b
+
+    ret
+.size L_ecb_enc_256,.-L_ecb_enc_256
+___
+}
+
+###############################################################################
+# void rv64i_zvkned_ecb_decrypt(const unsigned char *in, unsigned char *out,
+#                               size_t length, const AES_KEY *key,
+#                               const int enc);
+{
+my ($INP, $OUTP, $LEN, $KEYP, $ENC) = ("a0", "a1", "a2", "a3", "a4");
+my ($REMAIN_LEN) = ("a5");
+my ($VL) = ("a6");
+my ($T0, $T1, $rounds) = ("t0", "t1", "t2");
+my ($LEN32) = ("t3");
+my ($v0, $v1, $v2, $v3, $v4, $v5, $v6, $v7,
+    $v8, $v9, $v10, $v11, $v12, $v13, $v14, $v15,
+    $v16, $v17, $v18, $v19, $v20, $v21, $v22, $v23,
+    $v24, $v25, $v26, $v27, $v28, $v29, $v30, $v31,
+) = map("v$_",(0..31));
+
+$code .= <<___;
+.p2align 3
+.globl rv64i_zvkned_ecb_decrypt
+.type rv64i_zvkned_ecb_decrypt,\@function
+rv64i_zvkned_ecb_decrypt:
+    # Make the LEN become e32 length.
+    srli $LEN32, $LEN, 2
+
+    # Load number of rounds
+    lwu $rounds, 240($KEYP)
+
+    # Get proper routine for key size
+    li $T0, 10
+    beq $rounds, $T0, L_ecb_dec_128
+
+    li $T0, 12
+    beq $rounds, $T0, L_ecb_dec_192
+
+    li $T0, 14
+    beq $rounds, $T0, L_ecb_dec_256
+
+    ret
+.size rv64i_zvkned_ecb_decrypt,.-rv64i_zvkned_ecb_decrypt
+___
+
+$code .= <<___;
+.p2align 3
+L_ecb_dec_128:
+    # Load all 11 round keys to v1-v11 registers.
+    @{[aes_128_load_key]}
+
+1:
+    @{[vsetvli $VL, $LEN32, "e32", "m4", "ta", "ma"]}
+    slli $T0, $VL, 2
+    sub $LEN32, $LEN32, $VL
+
+    @{[vle32_v $v24, ($INP)]}
+
+    # AES body
+    @{[aes_128_decrypt]}
+
+    @{[vse32_v $v24, ($OUTP)]}
+
+    add $INP, $INP, $T0
+    add $OUTP, $OUTP, $T0
+
+    bnez $LEN32, 1b
+
+    ret
+.size L_ecb_dec_128,.-L_ecb_dec_128
+___
+
+$code .= <<___;
+.p2align 3
+L_ecb_dec_192:
+    # Load all 13 round keys to v1-v13 registers.
+    @{[aes_192_load_key]}
+
+1:
+    @{[vsetvli $VL, $LEN32, "e32", "m4", "ta", "ma"]}
+    slli $T0, $VL, 2
+    sub $LEN32, $LEN32, $VL
+
+    @{[vle32_v $v24, ($INP)]}
+
+    # AES body
+    @{[aes_192_decrypt]}
+
+    @{[vse32_v $v24, ($OUTP)]}
+
+    add $INP, $INP, $T0
+    add $OUTP, $OUTP, $T0
+
+    bnez $LEN32, 1b
+
+    ret
+.size L_ecb_dec_192,.-L_ecb_dec_192
+___
+
+$code .= <<___;
+.p2align 3
+L_ecb_dec_256:
+    # Load all 15 round keys to v1-v15 registers.
+    @{[aes_256_load_key]}
+
+1:
+    @{[vsetvli $VL, $LEN32, "e32", "m4", "ta", "ma"]}
+    slli $T0, $VL, 2
+    sub $LEN32, $LEN32, $VL
+
+    @{[vle32_v $v24, ($INP)]}
+
+    # AES body
+    @{[aes_256_decrypt]}
+
+    @{[vse32_v $v24, ($OUTP)]}
+
+    add $INP, $INP, $T0
+    add $OUTP, $OUTP, $T0
+
+    bnez $LEN32, 1b
+
+    ret
+.size L_ecb_dec_256,.-L_ecb_dec_256
+___
+
 }
 
 ################################################################################

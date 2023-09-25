@@ -462,6 +462,14 @@ void rv64i_zvkned_cbc_decrypt(const unsigned char *in, unsigned char *out,
                               size_t length, const AES_KEY *key,
                               unsigned char *ivec, const int enc);
 
+void rv64i_zvkned_ecb_encrypt(const unsigned char *in, unsigned char *out,
+                              size_t length, const AES_KEY *key,
+                              const int enc);
+
+void rv64i_zvkned_ecb_decrypt(const unsigned char *in, unsigned char *out,
+                              size_t length, const AES_KEY *key,
+                              const int enc);
+
 void rv64i_zvbb_zvkned_ctr32_encrypt_blocks(const unsigned char *in,
                                             unsigned char *out, size_t blocks,
                                             const void *key,
